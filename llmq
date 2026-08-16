@@ -118,6 +118,9 @@ def endpoint_url(url: str) -> str:
     return u + "/chat/completions"
 
 
+ERR_PREFIX = "__llmq_error__:"
+
+
 # --------------------------------------------------------------------------
 # api
 # --------------------------------------------------------------------------
@@ -229,16 +232,30 @@ class Ui:
 
     # -- geometry ----------------------------------------------------------
 
+    # Below this the box has no room for a border + prompt + one answer line.
+    MIN_W = 30
+    MIN_H = 6
+
     def box(self):
         h, w = self.scr.getmaxyx()
-        bw = max(40, min(w - 2, w * self.cfg["ui"]["width_pct"] // 100))
-        bh = max(8, min(h - 2, h * self.cfg["ui"]["height_pct"] // 100))
-        return (h - bh) // 2, (w - bw) // 2, bh, bw
+        # Clamp to the screen LAST: a 40-column floor on a 38-column terminal
+        # gives a negative origin, and derwin() then returns NULL.
+        bw = min(max(40, w * self.cfg["ui"]["width_pct"] // 100), max(self.MIN_W, w - 2))
+        bh = min(max(8, h * self.cfg["ui"]["height_pct"] // 100), max(self.MIN_H, h - 2))
+        return max(0, (h - bh) // 2), max(0, (w - bw) // 2), bh, bw
 
     # -- drawing -----------------------------------------------------------
 
     def draw(self):
         self.scr.erase()
+        h, w = self.scr.getmaxyx()
+        if h < self.MIN_H or w < self.MIN_W:
+            try:
+                self.scr.addnstr(0, 0, "llmq: terminal too small", max(0, w - 1))
+            except curses.error:
+                pass
+            self.scr.refresh()
+            return
         top, left, bh, bw = self.box()
         win = self.scr.derwin(bh, bw, top, left)
         win.box()
@@ -440,7 +457,11 @@ def in_tmux_popup_mode(cfg: dict, args) -> bool:
 def run_via_tmux(cfg: dict, args) -> str | None:
     fd, path = tempfile.mkstemp(prefix="llmq-")
     os.close(fd)
-    inner = [os.path.abspath(sys.argv[0]), "--popup-out", path]
+    me = os.path.abspath(sys.argv[0])
+    # Mirror llmq.fish: fall back to the interpreter if the script isn't +x,
+    # otherwise tmux exits 126 and -E hides the failure completely.
+    inner = ([me] if os.access(me, os.X_OK) else [sys.executable, me])
+    inner += ["--popup-out", path]
     if args.context:
         inner += ["--context", args.context]
     if args.config:
@@ -460,6 +481,10 @@ def run_via_tmux(cfg: dict, args) -> str | None:
         data = ""
     finally:
         Path(path).unlink(missing_ok=True)
+
+    if data.startswith(ERR_PREFIX):
+        print(f"llmq: {data[len(ERR_PREFIX):]}", file=sys.stderr)
+        return None
     return data or None
 
 
@@ -505,7 +530,19 @@ def main() -> int:
         os.close(tty_in)
 
     os.environ.setdefault("ESCDELAY", "25")
-    result = curses.wrapper(lambda scr: Ui(scr, cfg, args.context).run())
+    try:
+        result = curses.wrapper(lambda scr: Ui(scr, cfg, args.context).run())
+    except Exception as exc:
+        # `display-popup -E` tears the popup down the instant we exit, so a
+        # traceback printed here would never be readable. Hand it to the parent
+        # through the result file instead; it prints to stderr after the popup
+        # is gone. Outside a popup, stderr is already visible — just use it.
+        msg = f"{type(exc).__name__}: {exc}"
+        if args.popup_out:
+            Path(args.popup_out).write_text(ERR_PREFIX + msg)
+        else:
+            print(f"llmq: {msg}", file=sys.stderr)
+        return 1
 
     if not result:
         return 0
