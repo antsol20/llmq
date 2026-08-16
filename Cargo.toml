@@ -4,6 +4,8 @@ version = "0.2.0"
 edition = "2021"
 rust-version = "1.77"
 description = "Ask an LLM from your shell prompt and drop the answer into the command line"
+license = "Apache-2.0"
+repository = "https://github.com/antsol20/llmq"
 
 [dependencies]
 crossterm = "0.29"

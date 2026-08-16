@@ -117,3 +117,7 @@ inside `display-popup`; most of that 49 ms is tmux's own popup machinery.
 - A second binding that explains the command already on the line instead of
   writing a new one (same widget, different system prompt).
 - Cache the last answer so a repeat press reopens the browser without re-asking.
+
+## Licence
+
+Apache 2.0 — see [LICENSE](LICENSE).
