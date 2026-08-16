@@ -64,11 +64,18 @@ fn pad_clip(s: &str, width: usize) -> String {
     out
 }
 
+/// Byte offset of the `i`th char; the query is edited by char index but
+/// `String` mutators want bytes.
+fn byte_at(s: &str, i: usize) -> usize {
+    s.char_indices().nth(i).map(|(b, _)| b).unwrap_or(s.len())
+}
+
 pub struct Ui {
     cfg: Config,
     context: String,
     state: State,
     query: String,
+    cursor: usize, // char index into query
     buffer: String,
     error: String,
     lines: Vec<String>,
@@ -88,6 +95,7 @@ impl Ui {
             context,
             state: State::Ask,
             query: String::new(),
+            cursor: 0,
             buffer: String::new(),
             error: String::new(),
             lines: Vec::new(),
@@ -158,11 +166,9 @@ impl Ui {
         let prompt = if self.state == State::Ask { "ask> " } else { "  q> " };
         let avail = inner_w.saturating_sub(prompt.len());
         let qc: Vec<char> = self.query.chars().collect();
-        let shown: String = if qc.len() > avail {
-            qc[qc.len() - avail..].iter().collect()
-        } else {
-            self.query.clone()
-        };
+        // Scroll so the cursor stays visible, not just the tail.
+        let start = self.cursor.saturating_sub(avail);
+        let shown: String = qc[start..(start + avail).min(qc.len())].iter().collect();
         queue!(
             out,
             MoveTo(x + 2, y + 1),
@@ -239,7 +245,7 @@ impl Ui {
         )?;
 
         if self.state == State::Ask {
-            let col = (2 + prompt.len() + shown.chars().count()).min(bw - 2);
+            let col = (2 + prompt.len() + (self.cursor - start)).min(bw - 2);
             queue!(out, MoveTo(x + col as u16, y + 1), Show)?;
         }
         out.flush()
@@ -312,24 +318,61 @@ impl Ui {
 
         match self.state {
             State::Ask => {
+                let len = self.query.chars().count();
                 match k.code {
                     KeyCode::Enter => {
                         if !self.query.trim().is_empty() {
                             self.submit();
                         }
                     }
+                    KeyCode::Left => self.cursor = self.cursor.saturating_sub(1),
+                    KeyCode::Right => self.cursor = (self.cursor + 1).min(len),
+                    KeyCode::Home => self.cursor = 0,
+                    KeyCode::End => self.cursor = len,
+                    KeyCode::Char('a') if ctrl => self.cursor = 0,
+                    KeyCode::Char('e') if ctrl => self.cursor = len,
+                    KeyCode::Char('b') if ctrl => self.cursor = self.cursor.saturating_sub(1),
+                    KeyCode::Char('f') if ctrl => self.cursor = (self.cursor + 1).min(len),
                     KeyCode::Backspace => {
-                        self.query.pop();
+                        if self.cursor > 0 {
+                            self.cursor -= 1;
+                            let b = byte_at(&self.query, self.cursor);
+                            self.query.remove(b);
+                        }
                     }
-                    KeyCode::Char('u') if ctrl => self.query.clear(),
+                    KeyCode::Delete => {
+                        if self.cursor < len {
+                            let b = byte_at(&self.query, self.cursor);
+                            self.query.remove(b);
+                        }
+                    }
+                    KeyCode::Char('u') if ctrl => {
+                        let b = byte_at(&self.query, self.cursor);
+                        self.query = self.query.split_off(b);
+                        self.cursor = 0;
+                    }
+                    KeyCode::Char('k') if ctrl => {
+                        let b = byte_at(&self.query, self.cursor);
+                        self.query.truncate(b);
+                    }
                     KeyCode::Char('w') if ctrl => {
-                        let trimmed = self.query.trim_end();
-                        self.query = match trimmed.rsplit_once(' ') {
-                            Some((head, _)) => head.to_string(),
-                            None => String::new(),
-                        };
+                        let mut chars: Vec<char> = self.query.chars().collect();
+                        let mut i = self.cursor;
+                        while i > 0 && chars[i - 1] == ' ' {
+                            i -= 1;
+                        }
+                        while i > 0 && chars[i - 1] != ' ' {
+                            i -= 1;
+                        }
+                        chars.drain(i..self.cursor);
+                        self.query = chars.into_iter().collect();
+                        self.cursor = i;
                     }
-                    KeyCode::Char(c) if !ctrl && !c.is_control() => self.query.push(c),
+                    KeyCode::Char(c) if !ctrl && !c.is_control() => {
+                        let b = byte_at(&self.query, self.cursor);
+                        self.query.insert(b, c);
+                        self.cursor += 1;
+                    }
                     _ => {}
                 }
                 true
@@ -359,7 +402,10 @@ impl Ui {
                         self.result = Some(format!("{ACCEPT_PREFIX}{}", self.lines[self.sel]));
                         return false;
                     }
-                    KeyCode::Char('e') | KeyCode::Char('/') if !ctrl => self.state = State::Ask,
+                    KeyCode::Char('e') | KeyCode::Char('/') if !ctrl => {
+                        self.state = State::Ask;
+                        self.cursor = self.query.chars().count();
+                    }
                     _ => {}
                 }
                 true
@@ -386,13 +432,10 @@ impl Ui {
             self.pump();
             self.draw(out)?;
             if event::poll(Duration::from_millis(TICK))? {
-                match event::read()? {
-                    Event::Key(k) if k.kind == KeyEventKind::Press => {
-                        if !self.handle(k) {
-                            return Ok(self.result.take());
-                        }
+                if let Event::Key(k) = event::read()? {
+                    if k.kind == KeyEventKind::Press && !self.handle(k) {
+                        return Ok(self.result.take());
                     }
-                    _ => {}
                 }
             }
         }
@@ -426,5 +469,62 @@ mod tests {
     fn clip_and_pad_count_chars() {
         assert_eq!(clip("héllo", 3), "hél");
         assert_eq!(pad_clip("hé", 4).chars().count(), 4);
+    }
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(c: char) -> KeyEvent {
+        KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
+    }
+
+    fn ui_with(query: &str) -> Ui {
+        let mut ui = Ui::new(Config::default(), String::new());
+        for c in query.chars() {
+            ui.handle(key(KeyCode::Char(c)));
+        }
+        ui
+    }
+
+    #[test]
+    fn cursor_edits_mid_string_by_char_not_byte() {
+        let mut ui = ui_with("héllo");
+        ui.handle(key(KeyCode::Left));
+        ui.handle(key(KeyCode::Left));
+        ui.handle(key(KeyCode::Char('X')));
+        assert_eq!(ui.query, "hélXlo");
+        ui.handle(key(KeyCode::Home));
+        ui.handle(key(KeyCode::Delete));
+        assert_eq!(ui.query, "élXlo");
+        ui.handle(key(KeyCode::End));
+        ui.handle(key(KeyCode::Backspace));
+        assert_eq!(ui.query, "élXl");
+    }
+
+    #[test]
+    fn kill_bindings_are_cursor_aware() {
+        let mut ui = ui_with("one two three");
+        for _ in 0..6 {
+            ui.handle(key(KeyCode::Left));
+        }
+        ui.handle(ctrl('w')); // deletes "two", not "three"
+        assert_eq!(ui.query, "one  three");
+        ui.handle(ctrl('k'));
+        assert_eq!(ui.query, "one ");
+        ui.handle(ctrl('u'));
+        assert_eq!(ui.query, "");
+    }
+
+    #[test]
+    fn cursor_never_leaves_the_query() {
+        let mut ui = ui_with("ab");
+        ui.handle(key(KeyCode::Right));
+        assert_eq!(ui.cursor, 2);
+        ui.handle(key(KeyCode::Home));
+        ui.handle(key(KeyCode::Left));
+        assert_eq!(ui.cursor, 0);
+        ui.handle(key(KeyCode::Backspace));
+        assert_eq!(ui.query, "ab");
     }
 }
