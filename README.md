@@ -1,7 +1,8 @@
 # llmq
 
 Ask an LLM from your fish prompt and drop the answer straight into the command
-line. Alacritty + fish + starship, no dependencies beyond Python 3.11+.
+line. Alacritty + fish + starship. A single static-ish Rust binary — no runtime
+to install, and it paints in about 5 ms.
 
 ```
 ┌─ llmq ─────────────────────────────────────────┐
@@ -16,19 +17,24 @@ line. Alacritty + fish + starship, no dependencies beyond Python 3.11+.
 
 ## Install
 
-Drop the folder anywhere, make the script executable, and add one line to your
-fish config:
+Build it, then add one line to your fish config:
 
 ```fish
-chmod +x ~/src/llmq/llmq
+cd ~/src/llmq && cargo build --release
 
 echo 'source ~/src/llmq/llmq.fish' >> ~/.config/fish/config.fish
 ```
 
-`llmq.fish` finds the `llmq` script sitting next to it via `status
+`llmq.fish` locates the binary relative to itself via `status
 --current-filename`, so there is no symlink into PATH and no `conf.d` entry to
-manage. Move or rename the folder and it keeps working, as long as the two
-files stay together.
+manage. It prefers `./llmq` (copy the binary there if you want to throw the
+build tree away) and falls back to `./target/release/llmq`, so a working tree
+needs no install step. Move or rename the folder and it keeps working, as long
+as `llmq.fish` and the binary stay together.
+
+Building needs a Rust toolchain. Running it needs nothing at all — no
+interpreter, no shared libraries beyond libc. `tmux` is optional; without it
+the TUI simply draws inline.
 
 Then the config:
 
@@ -72,9 +78,9 @@ If the script lives somewhere unusual, set `LLMQ_BIN` *before* the source line.
    overlay API of its own, so the key has to arrive as bytes in the tty stream.
 2. **fish** binds that sequence to `_llmq_widget`, which calls `llmq` inside a
    command substitution and passes the current buffer as context.
-3. **llmq** saves `fd 1`, then points `fd 1` at `/dev/tty` so curses paints the
-   TUI on the terminal while the capture pipe stays clean. The chosen text is
-   written back to the saved descriptor at exit. (Atuin gets the same effect
+3. **llmq** saves `fd 1`, then points `fd 1` at `/dev/tty` so crossterm paints
+   the TUI on the terminal while the capture pipe stays clean. The chosen text
+   is written back to the saved descriptor at exit. (Atuin gets the same effect
    with `3>&1 1>&2 2>&3`; this is the same trick with fewer moving parts.)
 4. **fish** puts the result in the buffer with `commandline -r --`, and
    `commandline -f execute` if the answer carries the `__llmq_accept__:` prefix.
@@ -89,8 +95,21 @@ false` (or pass `--no-popup`) to always draw inline.
   if you want prose instead of bare commands.
 - `key_command = "pass show openai"` keeps the API key out of the config file.
 - `llmq --print-config` shows the effective config after merging defaults.
-- Streaming is plain SSE parsing over `urllib`, so any OpenAI-compatible server
+- Streaming is plain SSE parsing over `ureq`, so any OpenAI-compatible server
   works — including a local llama.cpp or Ollama with no key at all.
+- `cargo test` covers the config merge, key resolution and text wrapping.
+
+## Speed
+
+Measured on this machine, keypress to a painted, ready-to-type box:
+
+| | inline | inside tmux |
+|---|---|---|
+| Rust | 5 ms | 49 ms |
+| Python (v0.1) | 149 ms | 405 ms |
+
+The tmux column is larger because the popup runs a second copy of the binary
+inside `display-popup`; most of that 49 ms is tmux's own popup machinery.
 
 ## Ideas next
 

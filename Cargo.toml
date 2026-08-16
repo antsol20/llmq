@@ -1,0 +1,22 @@
+[package]
+name = "llmq"
+version = "0.2.0"
+edition = "2021"
+rust-version = "1.77"
+description = "Ask an LLM from your shell prompt and drop the answer into the command line"
+
+[dependencies]
+crossterm = "0.29"
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+shlex = "1"
+toml = "1"
+ureq = { version = "3", features = ["json"] }
+
+[profile.release]
+opt-level = "s"    # startup time is dominated by exec + dynamic linking, not codegen
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
