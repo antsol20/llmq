@@ -254,7 +254,9 @@ fn run() -> i32 {
         Ok(c) => c,
         Err(e) => {
             if args.print_config {
-                // still useful: show what the defaults are
+                // Diagnostics on stderr, defaults on stdout: without the first
+                // line a rejected config looks indistinguishable from no config.
+                eprintln!("llmq: {e}   (showing defaults)");
                 println!(
                     "{}",
                     serde_json::to_string_pretty(&config::Config::default()).unwrap()

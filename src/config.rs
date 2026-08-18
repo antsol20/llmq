@@ -53,6 +53,10 @@ pub struct Api {
     pub temperature: f64,
     pub max_tokens: u32,
     pub timeout: u64,
+    /// Merged verbatim into the request body. Every provider spells "don't
+    /// think" differently — `reasoning`, `reasoning_effort`, `thinkingConfig` —
+    /// so llmq stays ignorant and forwards whatever the config names.
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 impl Default for Api {
@@ -65,9 +69,20 @@ impl Default for Api {
             temperature: 0.2,
             max_tokens: 1024,
             timeout: 60,
+            extra: serde_json::Map::new(),
         }
     }
 }
+
+/// Body keys llmq writes itself. An `[api.extra]` entry that shadowed one of
+/// these would be silently ignored at request time, so reject it at load.
+const RESERVED: [(&str, &str); 5] = [
+    ("model", "model"),
+    ("messages", "prompt.system / the question"),
+    ("stream", "always true; llmq only speaks SSE"),
+    ("temperature", "temperature"),
+    ("max_tokens", "max_tokens"),
+];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -149,7 +164,23 @@ pub fn load(path: Option<&Path>) -> Result<Config, ConfigError> {
     }
     let text = std::fs::read_to_string(&owned)
         .map_err(|e| ConfigError::Parse(owned.clone(), e.to_string()))?;
-    toml::from_str(&text).map_err(|e| ConfigError::Parse(owned, e.message().to_string()))
+    let cfg: Config = toml::from_str(&text)
+        .map_err(|e| ConfigError::Parse(owned.clone(), e.message().to_string()))?;
+    if let Err(msg) = check_extra(&cfg.api) {
+        return Err(ConfigError::Parse(owned, msg));
+    }
+    Ok(cfg)
+}
+
+fn check_extra(api: &Api) -> Result<(), String> {
+    for (key, owner) in RESERVED {
+        if api.extra.contains_key(key) {
+            return Err(format!(
+                "[api.extra] may not set `{key}` — llmq writes it from {owner}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Key can be literal, `$ENV_VAR`, or the stdout of `key_command`.
@@ -200,6 +231,35 @@ mod tests {
         assert_eq!(cfg.api.url, Api::default().url); // untouched key in same table
         assert_eq!(cfg.ui.width_pct, 80); // whole table absent
         assert!(cfg.tmux.enabled);
+    }
+
+    #[test]
+    fn extra_survives_toml_to_json() {
+        let cfg: Config = toml::from_str(
+            "[api.extra]\nreasoning = { enabled = false }\nprovider = { sort = \"latency\" }\ntop_p = 0.9\n",
+        )
+        .unwrap();
+        let extra = &cfg.api.extra;
+        assert_eq!(extra["reasoning"]["enabled"], serde_json::json!(false));
+        assert_eq!(extra["provider"]["sort"], serde_json::json!("latency"));
+        assert_eq!(extra["top_p"], serde_json::json!(0.9));
+        assert_eq!(cfg.api.model, Api::default().model); // sibling keys untouched
+    }
+
+    #[test]
+    fn extra_defaults_to_empty() {
+        let cfg: Config = toml::from_str("[api]\nmodel = \"m\"\n").unwrap();
+        assert!(cfg.api.extra.is_empty());
+        assert!(check_extra(&cfg.api).is_ok());
+    }
+
+    #[test]
+    fn extra_may_not_shadow_a_key_llmq_owns() {
+        for key in ["model", "messages", "stream", "temperature", "max_tokens"] {
+            let cfg: Config = toml::from_str(&format!("[api.extra]\n{key} = \"x\"\n")).unwrap();
+            let err = check_extra(&cfg.api).unwrap_err();
+            assert!(err.contains(key), "{key}: {err}");
+        }
     }
 
     #[test]

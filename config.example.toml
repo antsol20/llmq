@@ -21,6 +21,23 @@ temperature = 0.2
 max_tokens = 1024
 timeout = 60
 
+# Anything here is merged verbatim into the JSON request body. Use it for
+# provider-specific knobs llmq has no field for. Keys llmq writes itself
+# (model, messages, stream, temperature, max_tokens) are rejected at startup.
+#
+# Reasoning models are slow because they think before answering, and llmq
+# discards `delta.reasoning` — so a thinking model looks like a hang. Turn it
+# off. The spelling depends on the provider:
+#   OpenRouter   reasoning = { enabled = false }
+#   OpenAI       reasoning_effort = "minimal"      # gpt-5 family
+#   vLLM/Qwen    chat_template_kwargs = { enable_thinking = false }
+# Note `reasoning = { exclude = true }` only *hides* the reasoning — you still
+# wait for it. `enabled = false` is the one that saves time.
+#
+# [api.extra]
+# reasoning = { enabled = false }
+# provider = { sort = "latency" }   # OpenRouter: pick the fastest upstream
+
 [prompt]
 system = """
 You are a terminal assistant. Reply with shell commands only.

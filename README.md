@@ -98,10 +98,26 @@ false` (or pass `--no-popup`) to always draw inline.
 - Streaming is plain SSE parsing over `ureq`, so any OpenAI-compatible server
   works — including a local llama.cpp or Ollama with no key at all.
 - `cargo test` covers the config merge, key resolution and text wrapping.
+- `[api.extra]` is merged straight into the request body, for provider knobs
+  llmq has no field of its own for.
+
+If you point llmq at a reasoning model it will look like it has hung: the
+answer only appears once the model has finished thinking, and llmq throws the
+thinking away. Turn it off — on OpenRouter that took `qwen3.7-flash` from a
+5301 ms median to 686 ms:
+
+```toml
+[api.extra]
+reasoning = { enabled = false }
+```
+
+The spelling is provider-specific: OpenAI's own endpoint wants
+`reasoning_effort = "minimal"`, and `reasoning = { exclude = true }` merely
+hides the reasoning — you still wait for it.
 
 ## Speed
 
-Measured on this machine, keypress to a painted, ready-to-type box:
+Startup, measured on this machine — keypress to a painted, ready-to-type box:
 
 | | inline | inside tmux |
 |---|---|---|

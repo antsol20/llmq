@@ -58,6 +58,13 @@ negative origin on narrow terminals and crashes. Verified from 20x10 to 200x50.
 **No clap.** Args are hand-parsed in `main.rs` because startup latency is the
 whole point — the binary paints in ~5 ms inline, ~49 ms inside tmux.
 
+**`[api.extra]` is a raw body passthrough.** Anything under it is merged into
+the JSON request verbatim by `api.rs::build_body`, because every provider spells
+"don't think" differently and llmq should not have to know which. The five keys
+llmq writes itself (`model`, `messages`, `stream`, `temperature`, `max_tokens`)
+are rejected by `config::check_extra` at load rather than silently ignored at
+request time.
+
 **`ACCEPT_PREFIX` / `ERR_PREFIX`.** `__llmq_accept__:` on stdout means "insert
 and run" (`^x`). `__llmq_error__:` is how the inner popup process reports a
 failure back through the temp file, since the popup itself vanishes.
@@ -90,10 +97,27 @@ Gemini 2.5 Flash Lite is the default and wins on every latency metric; its tail
 is what matters, since a line cannot be selected until the stream completes.
 
 The dominant effect when evaluating *any* new model is reasoning tokens. llmq
-discards `delta.reasoning`, so a thinking model looks like a hang. `qwen3.7-flash`
-went from 6499 ms with half its answers empty to 973 ms purely by sending
-`reasoning: {"enabled": false}`. Try that switch first. Note `gpt-5-nano` and
-`gpt-oss-20b` reject it with HTTP 400 and want `effort` instead.
+discards `delta.reasoning`, so a thinking model looks like a hang. Set
+`reasoning = { enabled = false }` under `[api.extra]` and try that before
+anything else. Re-measured 2026-08-18, 12 interleaved calls per variant, same
+request shape:
+
+| qwen/qwen3.7-flash | TTFT med | total med | total p90 | total max | empty |
+|---|---|---|---|---|---|
+| reasoning on | 4967 ms | 5301 ms | 6078 ms | 6383 ms | 1/10 |
+| reasoning off | 555 ms | **686 ms** | 955 ms | 5836 ms | 0/11 |
+| off + `provider = { sort = "latency" }` | 508 ms | 694 ms | **767 ms** | 2860 ms | 0/11 |
+
+A 7.7x cut to the median, and it puts a reasoning model level with
+gemini-2.5-flash-lite (639 ms median in the same run). `sort = "latency"` is a
+wash on the median and *may* tighten the tail; n is too small to call. Four
+HTTP 429s were dropped across variants, hence the uneven counts.
+
+Watch the spelling — it is not standardised. OpenRouter takes the `reasoning`
+object; OpenAI's own endpoint wants top-level `reasoning_effort = "minimal"`,
+and `gpt-5-nano` / `gpt-oss-20b` reject `{"enabled": false}` with HTTP 400.
+`reasoning = { exclude = true }` is a trap: it hides the reasoning but you still
+wait for it.
 
 Caveat on quality: in the sample set Gemini returned `mv *.jpeg *.jpg` (broken
 for more than one file) where all three alternatives returned a correct `for`
@@ -101,10 +125,6 @@ loop. One sample per query, so treat it as anecdote, not a benchmark.
 
 ## Known gaps
 
-- **No `[api.extra]` passthrough.** There is no way to send arbitrary keys in the
-  request body, which means `reasoning: {"enabled": false}` and
-  `provider: {sort: "latency"}` cannot be set from config. Roughly 15 lines
-  across `config.rs` and `api.rs`. Discussed, not approved, not built.
 - The tmux dispatch spawns a second copy of the binary. Moving it into
   `llmq.fish` would remove one process from the popup path.
 
